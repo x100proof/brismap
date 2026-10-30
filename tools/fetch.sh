@@ -16,7 +16,8 @@ fetch() {  # fetch <out.json> <query>; the public server is often busy, so back 
   done
   echo "$1: failed" >&2; exit 1
 }
-fetch councils.json   "[out:json][timeout:300];relation[\"boundary\"=\"administrative\"][\"admin_level\"=\"6\"][\"name\"~\"$COUNCILS\"];out geom;"
+# all councils around the five too, so split localities can name the other council
+fetch councils.json   "[out:json][timeout:300];relation[\"boundary\"=\"administrative\"][\"admin_level\"=\"6\"]($RB);out geom;"
 fetch localities.json "[out:json][timeout:300];area[\"boundary\"=\"administrative\"][\"admin_level\"=\"6\"][\"name\"~\"$COUNCILS\"]->.c;relation(area.c)[\"boundary\"=\"administrative\"][\"admin_level\"=\"9\"];out geom;"
 fetch coastline.json  "[out:json][timeout:300];way[\"natural\"=\"coastline\"]($BB);out geom;"
 fetch rivers.json     "[out:json][timeout:300];(way[\"natural\"=\"water\"][\"water\"=\"river\"]($RB);relation[\"natural\"=\"water\"][\"water\"=\"river\"]($RB);way[\"waterway\"=\"riverbank\"]($RB);relation[\"waterway\"=\"riverbank\"]($RB););out geom;"

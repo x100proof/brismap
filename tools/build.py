@@ -40,6 +40,7 @@ def relpoly(e):
 LG = {e['tags']['name']: relpoly(e) for e in json.load(open(DL + 'councils.json'))['elements']}
 CG = [LG[full] for _, full in COUNCILS]
 CU = unary_union(CG)
+FIVE = {full for _, full in COUNCILS}
 
 # ---------- coastline -> land ----------
 lines = [LineString([(p['lon'], p['lat']) for p in w['geometry']]) for w in json.load(open(DL + 'coastline.json'))['elements']]
@@ -68,13 +69,19 @@ for e in json.load(open(DL + 'localities.json'))['elements']:
     shl = [gl.intersection(c).area / gl.area if gl.area > 0 else 0 for c in CG]
     ks = [i for i in range(5) if sh[i] >= 0.03 or shl[i] >= 0.03]
     if not ks: continue
-    # keep only the part inside the five councils (drop slivers along the council edge)
-    p = sum(sh)
+    # a locality can reach past the five councils: keep it whole, note which councils hold the rest
+    p = sum(sh); gc, x = g, []
     if p < 0.97:
         gc = g.intersection(CU)
         gc = unary_union([q for q in getattr(gc, 'geoms', [gc]) if q.geom_type == 'Polygon' and q.area > 0.01 * gc.area])
-        g, gl = gc, gc.intersection(land_ll)
-    locs.append(dict(n=e['tags']['name'], g=g, gl=gl, k=ks, sh=sh, shl=shl, p=p))
+        for name, lg in LG.items():
+            if name in FIVE: continue
+            f = g.intersection(lg).area / g.area
+            if not name.startswith('Unincorporated') and f >= 0.01: x.append([name, round(f, 2)])
+        rest = 1 - p - sum(v[1] for v in x)  # open bay waters are in no council at all
+        if rest >= 0.01: x.append(['', round(rest, 2)])
+        x.sort(key=lambda v: -v[1])
+    locs.append(dict(n=e['tags']['name'], g=g, gl=gl, gc=gc, x=x, k=ks, sh=sh, shl=shl, p=p))
 log('localities', len(locs))
 for l in locs:
     if len(l['k']) > 1: log('  multi', l['n'], [(COUNCILS[i][0], round(l['sh'][i], 3), round(l['shl'][i], 3)) for i in l['k']])
@@ -181,17 +188,37 @@ def place(name, poly):
                     best = (score, fs, ang, L, c.x, c.y)
     return best
 
+PCU = proj(CU)
+# split shapes at the shoreline so the over-water parts can be drawn faded (an SVG mask is slow)
+LANDP = proj(land_ll).simplify(0.2).buffer(0); shapely.prepare(LANDP)
+def polys(g, amin):
+    return unary_union([q for q in getattr(g, 'geoms', [g]) if q.geom_type == 'Polygon' and q.area > amin])
+def wetsplit(g, key):
+    """{key: land part, key+'w': water part}, or {key: whole} when it is all on land"""
+    if shapely.contains(LANDP, g): return {key: polyd(g)}
+    dry, wet = polys(g.intersection(LANDP), 0.02), polys(g.difference(LANDP), 0.02)
+    if wet.is_empty or wet.area < 0.002 * g.area: return {key: polyd(g)}
+    o = {key + 'w': polyd(wet)}
+    if not dry.is_empty: o[key] = polyd(dry)
+    return o
 out = []
 for l, sg in zip(locs, SG):
-    pl = proj(l['gl']) if l['gl'].area > 0.02 * l['g'].area else proj(l['g'])
+    # label goes on the in-council land
+    gcl = l['gc'].intersection(land_ll)
+    pl = proj(gcl) if gcl.area > 0.02 * l['gc'].area else proj(l['gc'])
     pl = pl.buffer(0)
-    if pl.is_empty: pl = proj(l['g'])
+    if pl.is_empty: pl = proj(l['gc'])
+    o = {}
+    if l['x']:  # part outside the five councils, drawn grey
+        og = sg.difference(PCU).simplify(0.2)
+        og = unary_union([q for q in getattr(og, 'geoms', [og]) if q.geom_type == 'Polygon' and q.area > 0.3])
+        if not og.is_empty: o = dict(oc=l['x'], **wetsplit(og, 'o'))
     _, fs, ang, L, x, y = place(l['base'], pl)
     fs = min(fs, 18)
     if fs >= 8.5:  # bold is wider: refit width
         w4 = max(tw(s, 400) for s in L); w7 = max(tw(s, 700) for s in L); fs = fs * w4 / w7
-    out.append(dict(n=l['n'], d=polyd(sg), c=col[l['n']], a=l['a'], k=l['k'], x=round(x, 2), y=round(y, 2),
-                    fs=round(fs, 2), ang=ang, L=L, w=700 if fs >= 8.2 else 400, **({'p': round(l['p'], 2)} if l['p'] < 0.97 else {})))
+    out.append(dict(n=l['n'], **wetsplit(sg, 'd'), c=col[l['n']], a=l['a'], k=l['k'], x=round(x, 2), y=round(y, 2),
+                    fs=round(fs, 2), ang=ang, L=L, w=700 if fs >= 8.2 else 400, **o))
 log('labels done')
 
 # ---------- extents ----------
@@ -225,7 +252,7 @@ river = unary_union([g for g in getattr(river, 'geoms', [river]) if g.area > 0.0
 # council boundary lines (each shared edge once)
 cbl = unary_union([proj(cg).boundary for cg in CG]).simplify(0.2)
 old = json.load(open(DL + 'extras.json'))  # river label path, POIs, water label positions
-D = dict(f=out, cn=cn, land=polyd(land), shore=lined(shore), river=polyd(river), rlab=old['rlab'], cb=lined(linemerge(cbl) if cbl.geom_type == 'MultiLineString' else cbl),
+D = dict(f=out, cn=cn, land=polyd(land), shore=lined(shore), river=polyd(river), rlab=old['rlab'], cb=lined(linemerge(cbl.intersection(LANDP))), cbw=lined(linemerge(cbl.difference(LANDP))),
          box=[round(v, 2) for v in box_], pois=old['pois'], bay=old['bay'], pac=old['pac'], adj=adj)
 js = 'const D=' + json.dumps(D, separators=(',', ':'), ensure_ascii=False) + ';'
 i = page.index('const D='); j = page.index('\n', i)
