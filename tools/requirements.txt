@@ -1,0 +1,4 @@
+shapely>=2.1
+numpy
+fonttools
+brotli
